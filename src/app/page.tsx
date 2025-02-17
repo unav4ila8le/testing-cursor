@@ -1,17 +1,16 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
 import { Button } from "@/components/ui/button";
 import { Trash2 } from "lucide-react";
 import * as Form from "@radix-ui/react-form";
+import { supabase } from "@/lib/supabase";
+import type { Tables } from "@/lib/supabase";
 
-type Todo = {
-  id: string;
-  text: string;
-};
+type Todo = Tables["todos"]["Row"];
 
 const todoSchema = z.object({
   text: z.string().min(1, "Todo cannot be empty").max(100, "Todo is too long"),
@@ -21,6 +20,7 @@ type TodoFormData = z.infer<typeof todoSchema>;
 
 export default function Home() {
   const [todos, setTodos] = useState<Todo[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
   const {
     register,
     handleSubmit,
@@ -33,14 +33,78 @@ export default function Home() {
 
   const todoText = watch("text");
 
+  useEffect(() => {
+    const fetchTodos = async () => {
+      try {
+        const { data, error } = await supabase
+          .from("todos")
+          .select("*")
+          .order("created_at", { ascending: false });
+
+        if (error) throw error;
+        setTodos(data || []);
+      } catch (error) {
+        console.error("Error fetching todos:", error);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    fetchTodos();
+
+    // Set up real-time subscription
+    const subscription = supabase
+      .channel("todos")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "todos" },
+        (payload) => {
+          if (payload.eventType === "INSERT") {
+            setTodos((current) => [payload.new as Todo, ...current]);
+          } else if (payload.eventType === "DELETE") {
+            setTodos((current) =>
+              current.filter((todo) => todo.id !== payload.old.id),
+            );
+          }
+        },
+      )
+      .subscribe();
+
+    return () => {
+      subscription.unsubscribe();
+    };
+  }, []);
+
   const onSubmit = handleSubmit(async (data) => {
-    setTodos([...todos, { id: crypto.randomUUID(), text: data.text.trim() }]);
-    reset();
+    try {
+      const { error } = await supabase
+        .from("todos")
+        .insert([{ text: data.text.trim() }]);
+
+      if (error) throw error;
+      reset();
+    } catch (error) {
+      console.error("Error adding todo:", error);
+    }
   });
 
-  const deleteTodo = (id: string) => {
-    setTodos(todos.filter((todo) => todo.id !== id));
+  const deleteTodo = async (id: string) => {
+    try {
+      const { error } = await supabase.from("todos").delete().eq("id", id);
+
+      if (error) throw error;
+    } catch (error) {
+      console.error("Error deleting todo:", error);
+    }
   };
+
+  if (isLoading) {
+    return (
+      <main className="mx-auto min-h-screen max-w-2xl p-4 md:p-8">
+        <h1 className="mb-8 text-2xl font-semibold">Loading...</h1>
+      </main>
+    );
+  }
 
   return (
     <main className="mx-auto min-h-screen max-w-2xl p-4 md:p-8">
